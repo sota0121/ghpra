@@ -1,0 +1,241 @@
+package main
+
+import (
+	"context"
+	"encoding/csv"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"time"
+
+	"github.com/google/go-github/github"
+	"github.com/joho/godotenv"
+	"golang.org/x/oauth2"
+	"gopkg.in/yaml.v3"
+)
+
+const (
+	DefaultConfigFileName = "config.yml"
+	DefaultEnvFileName    = ".env"
+	DefaultResultFileName = "result.csv"
+)
+
+type ConfigElement struct {
+	SourceOwner string `yaml:"source_owner"`
+	SourceRepo  string `yaml:"source_repo"`
+	BaseBranch  string `yaml:"base_branch"`
+}
+
+type Config struct {
+	Elements []ConfigElement `yaml:"elements"`
+}
+
+type PullRequest struct {
+	Title     string
+	CreatedAt time.Time
+	MergedAt  time.Time
+	Merged    bool
+}
+
+func main() {
+	fmt.Println(">> Start GitHub Pull Request Aggregation!")
+	exec, err := os.Executable()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	// Load config file
+	config, err := loadConfig(filepath.Join(filepath.Dir(exec), DefaultConfigFileName))
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	// Let the user select the config
+	fmt.Println("Select the config:")
+	for i, element := range config.Elements {
+		fmt.Println(i, ":", element.SourceOwner, "/", element.SourceRepo, ":", element.BaseBranch)
+	}
+	var selected int
+	fmt.Scan(&selected)
+	if selected < 0 || selected >= len(config.Elements) {
+		fmt.Println("Invalid selection")
+		return
+	}
+	sourceOwner := config.Elements[selected].SourceOwner
+	sourceRepo := config.Elements[selected].SourceRepo
+	baseBranch := config.Elements[selected].BaseBranch
+
+	// Load .env file
+	err = godotenv.Load(filepath.Join(filepath.Dir(exec), DefaultEnvFileName))
+	if err != nil {
+		fmt.Println("Error loading .env file")
+		return
+	}
+	ght := os.Getenv("GITHUB_ACCESS_TOKEN")
+
+	// Authentication
+	ctx := context.Background()
+	ts := oauth2.StaticTokenSource(
+		&oauth2.Token{
+			AccessToken: ght,
+		},
+	)
+	tc := oauth2.NewClient(ctx, ts)
+	client := github.NewClient(tc)
+
+	// get my user
+	user, _, err := client.Users.Get(ctx, "")
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	fmt.Println("Authenticated user:", *user.Login)
+
+	// list recent pull requests for the authenticated user
+	prs, _, err := listClosedPullRequestsByClient(ctx, client, sourceOwner, sourceRepo, baseBranch, *user.Login)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	fmt.Println("Pull Requests of the authenticated user (", len(prs), ") :")
+	for _, pr := range prs {
+		fmt.Println(*pr.Title)
+	}
+
+	// Write to a file
+	outputFilePath := filepath.Join(filepath.Dir(exec), DefaultResultFileName)
+	fmt.Println("Writing to a file:", outputFilePath)
+	err = writeResultCSV(outputFilePath, prs)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	// // list all repositories for the authenticated user
+	// repos, _, err := listRepos(ctx, client)
+	// if err != nil {
+	// 	fmt.Println(err)
+	// 	return
+	// }
+
+	// fmt.Println("Repositories of the authenticated user:")
+	// for _, repo := range repos {
+	// 	fmt.Println(*repo.Name)
+	// }
+}
+
+func loadConfig(path string) (*Config, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var config Config
+	decoder := yaml.NewDecoder(f)
+	err = decoder.Decode(&config)
+	if err != nil {
+		return nil, err
+	}
+
+	return &config, nil
+}
+
+func listClosedPullRequestsByClient(ctx context.Context, client *github.Client, owner, repo, baseBranch, username string) ([]*github.PullRequest, *github.Response, error) {
+	// Create PullRequestListOptions
+	// https://godoc.org/github.com/google/go-github/github#PullRequestListOptions
+	opt := &github.PullRequestListOptions{
+		State: "closed",
+		ListOptions: github.ListOptions{
+			PerPage: 30,
+		},
+		Base: baseBranch,
+		// Head: username + ":" + "develop",
+	}
+
+	// list all pull requests
+	var prs []*github.PullRequest
+	for {
+		curprs, res, err := client.PullRequests.List(ctx, owner, repo, opt)
+		if err != nil {
+			return nil, res, err
+		}
+		prs = append(prs, curprs...)
+		fmt.Print("*")
+
+		if res.NextPage == 0 {
+			fmt.Println("")
+			break
+		}
+		opt.ListOptions.Page = res.NextPage
+	}
+
+	// extract pull requests which owned by the authenticated user
+	var myprs []*github.PullRequest
+	for _, pr := range prs {
+		if *pr.User.Login == username {
+			myprs = append(myprs, pr)
+		}
+	}
+
+	return myprs, nil, nil
+}
+
+func listRepos(ctx context.Context, client *github.Client) ([]*github.Repository, *github.Response, error) {
+	repos, res, err := client.Repositories.List(ctx, "", nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	return repos, res, nil
+}
+
+func writeResultCSV(path string, prs []*github.PullRequest) error {
+	var records []*PullRequest
+	for _, pr := range prs {
+		// [Note]
+		// pr.MergedAt is nil if the pull request has not been merged.
+		// And, pr.Merged is always nil. This is probably a bug.
+		// We need to check pr.MergedAt is nil or not.
+		mergedAt := time.Time{}
+		merged := false
+		if pr.MergedAt != nil {
+			mergedAt = *pr.MergedAt
+			merged = true
+		}
+
+		record := &PullRequest{
+			Title:     *pr.Title,
+			CreatedAt: *pr.CreatedAt,
+			MergedAt:  mergedAt,
+			Merged:    merged,
+		}
+
+		records = append(records, record)
+	}
+
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	for _, record := range records {
+		err := writer.Write([]string{
+			record.Title,
+			record.CreatedAt.String(),
+			record.MergedAt.String(),
+			strconv.FormatBool(record.Merged),
+		})
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
