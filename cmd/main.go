@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -15,7 +16,9 @@ import (
 )
 
 const (
-	rootDir = "features/ghpra"
+	DefaultConfigFileName = "config.yml"
+	DefaultEnvFileName    = ".env"
+	DefaultResultFileName = "result.csv"
 )
 
 type ConfigElement struct {
@@ -37,8 +40,14 @@ type PullRequest struct {
 
 func main() {
 	fmt.Println(">> Start GitHub Pull Request Aggregation!")
+	exec, err := os.Executable()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
 	// Load config file
-	config, err := loadConfig(rootDir + "/config.yml")
+	config, err := loadConfig(filepath.Join(filepath.Dir(exec), DefaultConfigFileName))
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -60,7 +69,7 @@ func main() {
 	baseBranch := config.Elements[selected].BaseBranch
 
 	// Load .env file
-	err = godotenv.Load(rootDir + "/.env")
+	err = godotenv.Load(filepath.Join(filepath.Dir(exec), DefaultEnvFileName))
 	if err != nil {
 		fmt.Println("Error loading .env file")
 		return
@@ -97,7 +106,7 @@ func main() {
 	}
 
 	// Write to a file
-	outputFilePath := rootDir + "/result.csv"
+	outputFilePath := filepath.Join(filepath.Dir(exec), DefaultResultFileName)
 	fmt.Println("Writing to a file:", outputFilePath)
 	err = writeResultCSV(outputFilePath, prs)
 	if err != nil {

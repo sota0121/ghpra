@@ -3,7 +3,7 @@
 APP_NAME := ghpra
 BIN_DIR := bin
 
-build: clean test
+build: test
 	go build -o $(BIN_DIR)/$(APP_NAME) cmd/*.go
 
 clean:
